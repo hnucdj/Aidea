@@ -1,0 +1,320 @@
+{
+  "stats": [
+    {
+      "platform": "jd",
+      "platform_name": "京东",
+      "count": 3,
+      "price_min": 94.08,
+      "price_max": 505.94,
+      "price_avg": 339.17,
+      "price_median": 417.49,
+      "sales_total": 207558,
+      "rating_avg": 4.47
+    },
+    {
+      "platform": "pdd",
+      "platform_name": "拼多多",
+      "count": 3,
+      "price_min": 408.79,
+      "price_max": 710.95,
+      "price_avg": 520.76,
+      "price_median": 442.54,
+      "sales_total": 4978,
+      "rating_avg": 4.63
+    },
+    {
+      "platform": "taobao",
+      "platform_name": "淘宝",
+      "count": 3,
+      "price_min": 31.49,
+      "price_max": 757.0,
+      "price_avg": 311.68,
+      "price_median": 146.55,
+      "sales_total": 62581,
+      "rating_avg": 4.33
+    },
+    {
+      "platform": "ALL",
+      "platform_name": "全部平台",
+      "count": 9,
+      "price_min": 31.49,
+      "price_max": 757.0,
+      "price_avg": 390.54,
+      "price_median": 417.49,
+      "sales_total": 275117,
+      "rating_avg": 4.48
+    }
+  ],
+  "distribution": [
+    {
+      "range_start": 31.49,
+      "range_end": 31.49,
+      "count": 1
+    },
+    {
+      "range_start": 94.08,
+      "range_end": 94.08,
+      "count": 1
+    },
+    {
+      "range_start": 146.55,
+      "range_end": 146.55,
+      "count": 1
+    },
+    {
+      "range_start": 408.79,
+      "range_end": 408.79,
+      "count": 1
+    },
+    {
+      "range_start": 417.49,
+      "range_end": 417.49,
+      "count": 1
+    },
+    {
+      "range_start": 442.54,
+      "range_end": 442.54,
+      "count": 1
+    },
+    {
+      "range_start": 505.94,
+      "range_end": 505.94,
+      "count": 1
+    },
+    {
+      "range_start": 710.95,
+      "range_end": 710.95,
+      "count": 1
+    },
+    {
+      "range_start": 757.0,
+      "range_end": 757.0,
+      "count": 1
+    }
+  ],
+  "distribution_by_platform": {
+    "jd": [
+      {
+        "range_start": 94.08,
+        "range_end": 94.08,
+        "count": 1
+      },
+      {
+        "range_start": 417.49,
+        "range_end": 417.49,
+        "count": 1
+      },
+      {
+        "range_start": 505.94,
+        "range_end": 505.94,
+        "count": 1
+      }
+    ],
+    "pdd": [
+      {
+        "range_start": 408.79,
+        "range_end": 408.79,
+        "count": 1
+      },
+      {
+        "range_start": 442.54,
+        "range_end": 442.54,
+        "count": 1
+      },
+      {
+        "range_start": 710.95,
+        "range_end": 710.95,
+        "count": 1
+      }
+    ],
+    "taobao": [
+      {
+        "range_start": 31.49,
+        "range_end": 31.49,
+        "count": 1
+      },
+      {
+        "range_start": 146.55,
+        "range_end": 146.55,
+        "count": 1
+      },
+      {
+        "range_start": 757.0,
+        "range_end": 757.0,
+        "count": 1
+      }
+    ]
+  },
+  "cross_compare": [
+    {
+      "platform": "jd",
+      "platform_name": "京东",
+      "lowest_price": 94.08,
+      "item_name": "联想拯救者 旗舰新品 D",
+      "item_url": "https://item.jd.com/58008440.html",
+      "shop_name": "授权专卖店",
+      "rating": 4.7,
+      "sales": 94363
+    },
+    {
+      "platform": "pdd",
+      "platform_name": "拼多多",
+      "lowest_price": 408.79,
+      "item_name": "联想拯救者 全网低价 C",
+      "item_url": "https://mobile.yangkeduo.com/89328898.html",
+      "shop_name": "精选好物",
+      "rating": 4.7,
+      "sales": 32
+    },
+    {
+      "platform": "taobao",
+      "platform_name": "淘宝",
+      "lowest_price": 31.49,
+      "item_name": "联想拯救者 天猫精选爆款 A",
+      "item_url": "https://detail.tmall.com/12496877.html",
+      "shop_name": "金冠好店",
+      "rating": 3.7,
+      "sales": 19
+    }
+  ],
+  "items": [
+    {
+      "platform": "taobao",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 天猫精选爆款 A",
+      "price": 31.49,
+      "original_price": 33.57,
+      "sales": 19,
+      "rating": 3.7,
+      "shop_name": "金冠好店",
+      "url": "https://detail.tmall.com/12496877.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:45",
+      "value_score": 0.4,
+      "recommend": "低价好货"
+    },
+    {
+      "platform": "jd",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 旗舰新品 D",
+      "price": 94.08,
+      "original_price": 107.52,
+      "sales": 94363,
+      "rating": 4.7,
+      "shop_name": "授权专卖店",
+      "url": "https://item.jd.com/58008440.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:44",
+      "value_score": 0.915,
+      "recommend": "性价比推荐"
+    },
+    {
+      "platform": "taobao",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 品牌直营好货 B",
+      "price": 146.55,
+      "original_price": 160.16,
+      "sales": 7832,
+      "rating": 4.8,
+      "shop_name": "品牌直营",
+      "url": "https://detail.tmall.com/57638974.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:45",
+      "value_score": 0.636,
+      "recommend": "性价比推荐"
+    },
+    {
+      "platform": "pdd",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 全网低价 C",
+      "price": 408.79,
+      "original_price": 499.02,
+      "sales": 32,
+      "rating": 4.7,
+      "shop_name": "精选好物",
+      "url": "https://mobile.yangkeduo.com/89328898.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:46",
+      "value_score": 0.442,
+      "recommend": ""
+    },
+    {
+      "platform": "jd",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 明星爆款 C",
+      "price": 417.49,
+      "original_price": 466.62,
+      "sales": 50851,
+      "rating": 3.8,
+      "shop_name": "京东自营",
+      "url": "https://item.jd.com/90478950.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:44",
+      "value_score": 0.374,
+      "recommend": ""
+    },
+    {
+      "platform": "pdd",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 工厂直销 B",
+      "price": 442.54,
+      "original_price": 465.73,
+      "sales": 240,
+      "rating": 4.5,
+      "shop_name": "精选好物",
+      "url": "https://mobile.yangkeduo.com/92861385.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:46",
+      "value_score": 0.374,
+      "recommend": ""
+    },
+    {
+      "platform": "jd",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 精选好物 B",
+      "price": 505.94,
+      "original_price": 550.51,
+      "sales": 62344,
+      "rating": 4.9,
+      "shop_name": "官方旗舰店",
+      "url": "https://item.jd.com/29331188.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:44",
+      "value_score": 0.637,
+      "recommend": "性价比推荐"
+    },
+    {
+      "platform": "pdd",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 拼团热卖 E",
+      "price": 710.95,
+      "original_price": 914.34,
+      "sales": 4706,
+      "rating": 4.7,
+      "shop_name": "工厂直营店",
+      "url": "https://mobile.yangkeduo.com/47123268.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:46",
+      "value_score": 0.29,
+      "recommend": ""
+    },
+    {
+      "platform": "taobao",
+      "keyword": "联想拯救者",
+      "name": "联想拯救者 工厂直供 F",
+      "price": 757.0,
+      "original_price": 873.62,
+      "sales": 54730,
+      "rating": 4.5,
+      "shop_name": "品牌直营",
+      "url": "https://detail.tmall.com/54027813.html",
+      "image_url": "",
+      "crawled_at": "2026-11-23 14:17:45",
+      "value_score": 0.374,
+      "recommend": ""
+    }
+  ],
+  "total": 9,
+  "keyword": "联想拯救者",
+  "generated_at": "2026-11-23 14:17:46"
+}
