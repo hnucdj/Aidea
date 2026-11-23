@@ -1,12 +1,28 @@
 /**
- * 电商价格采集 Node.js 后端
- * 兼容 Node 20，无任何 native 依赖
+ * 电商价格采集 Node.js 后端 - v2
+ * 特性: 代理 IP 池 + 多策略抓取 + 真实/回退透明标注
+ * 环境变量:
+ *   PROXY_URL     单个代理 URL (e.g. http://user:pass@ip:port)
+ *   PROXY_LIST    多个代理，逗号分隔
+ *   PROXY_ENABLE  "false" 时关闭代理池（默认开启）
  */
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
 const path = require('path');
+const https = require('https');
+
+// 代理支持（优雅降级：没装 https-proxy-agent 就用原生）
+let HttpsProxyAgent, HttpProxyAgent;
+try {
+  const mod = require('https-proxy-agent');
+  HttpsProxyAgent = mod.HttpsProxyAgent;
+  HttpProxyAgent = mod.HttpProxyAgent || mod.HttpsProxyAgent;
+} catch (e) {
+  HttpsProxyAgent = null;
+  HttpProxyAgent = null;
+}
 
 const app = express();
 app.use(cors());
@@ -17,7 +33,206 @@ const PLATFORM_NAMES = { jd: '京东', taobao: '淘宝', pdd: '拼多多' };
 const PLATFORM_COLORS = { jd: '#E1251B', taobao: '#FF6A00', pdd: '#E02E24' };
 
 // ==============================================================
-// 1. 种子库（用于真实爬虫失败时的回退数据）
+// 0. 代理池管理器
+// ==============================================================
+class ProxyPool {
+  constructor() {
+    this.list = [];         // [{url, ok, failCount, lastCheck, latency}]
+    this.fetchAt = 0;
+    this.enabled = process.env.PROXY_ENABLE !== 'false';
+    this.lockUrl = process.env.PROXY_URL;
+    if (this.lockUrl) {
+      this.list.push({ url: this.lockUrl.replace(/^https?:\/\//, 'http://'), ok: true, failCount: 0, latency: 0 });
+      this.fetchAt = Date.now();
+    }
+    this.lockList = (process.env.PROXY_LIST || '')
+      .split(',').map(s => s.trim()).filter(Boolean)
+      .map(u => u.replace(/^https?:\/\//, 'http://'));
+    for (const u of this.lockList) {
+      if (!this.list.some(x => x.url === u)) this.list.push({ url: u, ok: true, failCount: 0, latency: 0 });
+      this.fetchAt = Date.now();
+    }
+    this.stats = { totalReq: 0, proxyHits: 0, proxyOk: 0, proxyFail: 0 };
+  }
+
+  async refresh(force = false) {
+    if (!this.enabled) return this;
+    const CACHE_MS = 30 * 60 * 1000;
+    if (this.lockUrl || this.lockList.length) return this;
+    // 已有足够可用代理且未过期 → 跳过
+    const ok = this.list.filter(x => x.ok);
+    if (!force && ok.length >= 15 && Date.now() - this.fetchAt < CACHE_MS) return this;
+    // 首次启动 → 用内置代理（秒回！不走网络）
+    if (!force && this.list.length === 0) {
+      const builtin = [
+        'http://45.168.244.16:8080', 'http://124.217.109.153:8082',
+        'http://103.167.66.182:8088', 'http://45.174.248.23:999',
+        'http://102.38.7.149:18000', 'http://36.92.149.235:8080',
+        'http://160.251.172.183:3128', 'http://139.5.75.83:8080',
+        'http://103.227.187.193:6080', 'http://156.230.176.245:8080',
+        'http://223.25.100.42:2222', 'http://189.51.168.164:999',
+        'http://177.184.195.168:8080', 'http://45.225.89.145:999',
+        'http://129.151.130.247:1111', 'http://181.129.16.218:8080',
+        'http://103.20.108.51:8080', 'http://131.196.13.233:999',
+        'http://180.191.2.165:8081', 'http://203.175.103.25:3125',
+        'http://45.161.128.36:8080', 'http://103.189.223.38:8080',
+        'http://36.92.199.158:8080', 'http://185.147.157.135:3128',
+        'http://217.28.220.182:3128', 'http://84.55.46.85:8080',
+        'http://3.224.26.242:80',     'http://163.172.167.48:80',
+        'http://103.153.247.74:8080', 'http://49.0.26.97:8080',
+      ];
+      this.list = builtin.map(url => ({ url, ok: true, failCount: 0, latency: 0, lastCheck: Date.now() }));
+      this.fetchAt = Date.now();
+      console.log(`[ProxyPool] 内置 ${this.list.length} 个代理（快速启动）`);
+      setImmediate(() => this._refreshAsync()); // 异步增量刷新
+      return this;
+    }
+    await this._refreshAsync();
+    return this;
+  }
+
+  async _refreshAsync() {
+    try {
+      const sources = ['https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt', 'https://spys.me/proxy.txt'];
+      const all = new Set();
+      for (const src of sources) {
+        try {
+          const r = await axios.get(src, { timeout: 4000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+          (r.data.match(/(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}/g) || []).forEach(ip => all.add('http://' + ip));
+        } catch (e) { /* 源超时跳过 */ }
+      }
+      const seen = new Set(this.list.map(x => x.url));
+      const fresh = [...all].filter(u => !seen.has(u)).slice(0, 15);
+      if (!fresh.length) { this.fetchAt = Date.now(); return; }
+      const tested = await Promise.all(fresh.map(url => this.test(url)));
+      const ok = tested.filter(x => x.ok);
+      if (ok.length) {
+        this.list = [...this.list, ...ok].slice(0, 500);
+        console.log(`[ProxyPool] 异步刷新 +${ok.length}`);
+      }
+      this.fetchAt = Date.now();
+    } catch (e) { /* 忽略异步错误 */ }
+  }
+
+  async test(url) {
+    const t0 = Date.now();
+    try {
+      const agent = new (HttpsProxyAgent || HttpProxyAgent)(url, { timeout: 3000 });
+      const r = await axios.get('https://www.baidu.com/', {
+        httpsAgent: agent, httpAgent: agent, timeout: 3500, maxRedirects: 2,
+      });
+      if (r.data && r.data.includes('<html')) {
+        return { url, ok: true, failCount: 0, latency: Date.now() - t0, lastCheck: Date.now() };
+      }
+    } catch (e) { /* ignore */ }
+    return { url, ok: false, failCount: (this.list.find(x => x.url === url)?.failCount || 0) + 1, latency: 0, lastCheck: Date.now() };
+  }
+
+  pickN(n) {
+    const ok = this.list.filter(x => x.ok).sort((a, b) => a.failCount - b.failCount);
+    const picked = [];
+    for (const item of ok) {
+      if (picked.length >= n) break;
+      picked.push(item.url);
+    }
+    return picked;
+  }
+
+  report(url, success) {
+    const item = this.list.find(x => x.url === url);
+    if (item) {
+      item.ok = success;
+      item.failCount = success ? 0 : item.failCount + 1;
+      item.lastCheck = Date.now();
+      if (success) this.stats.proxyOk++; else this.stats.proxyFail++;
+    }
+  }
+
+  get status() {
+    const okCount = this.list.filter(x => x.ok).length;
+    const failCount = this.list.filter(x => !x.ok).length;
+    return {
+      enabled: this.enabled,
+      lockUrl: !!this.lockUrl,
+      lockListCount: this.lockList.length,
+      totalCount: this.list.length,
+      okCount, failCount,
+      fetchedAt: new Date(this.fetchAt).toISOString(),
+      stats: this.stats,
+      sample: this.list.filter(x => x.ok).slice(0, 5).map(x => ({ url: x.url, latency: x.latency })),
+    };
+  }
+}
+
+const PROXY = new ProxyPool();
+
+/**
+ * 带代理的 HTTP 请求 —— 先直连(3s)，直连失败/空壳再用代理(2.5s×2)，整体 < 8s
+ * 反爬检测：body 短 / 含风控关键词 → 视为失败，换代理
+ */
+const RISK_KEYWORDS = ['京东验证', 'risk/shields', 'probe.js', 'captcha', 'verify/safety',
+                       '反爬虫', '访问验证', '人机验证', 'safedns'];
+
+function isRiskyBody(body) {
+  if (!body) return true;
+  if (body.length < 800) return true;
+  for (const kw of RISK_KEYWORDS) if (body.includes(kw)) return true;
+  // 返回 JSON 但不是商品数据
+  if (body.trim().startsWith('{') && body.length < 2000) return true;
+  return false;
+}
+
+async function proxiedRequest(url, opts = {}) {
+  PROXY.stats.totalReq++;
+  await PROXY.refresh();
+
+  const maxProxies = opts.maxProxies || 2;
+  const DIRECT_TIMEOUT = 3000;
+  const PROXY_TIMEOUT = 2500;
+
+  // —— 阶段 1: 直连（快速返回，直连被风控的电商会 200 但 body 是空壳 → 立即识别）——
+  try {
+    const r = await axios.get(url, { ...opts, timeout: DIRECT_TIMEOUT, maxRedirects: 5 });
+    const body = String(r.data || '');
+    if (!isRiskyBody(body)) {
+      return { ...r, _proxy: null, _viaProxy: false };
+    }
+    // 直连返回风控页 → 标记为一次失败，继续代理
+  } catch (e) { /* 直连网络错误 → 走代理 */ }
+
+  // —— 阶段 2: 代理池兜底（2 个代理，各 2.5s）——
+  const proxies = PROXY.pickN(maxProxies);
+  for (const pUrl of proxies) {
+    try {
+      PROXY.stats.proxyHits++;
+      const agent = new (HttpsProxyAgent || HttpProxyAgent)(pUrl, { timeout: PROXY_TIMEOUT });
+      const r = await axios.get(url, {
+        ...opts, httpsAgent: agent, httpAgent: agent,
+        timeout: PROXY_TIMEOUT, maxRedirects: 5,
+      });
+      const body = String(r.data || '');
+      if (r.status === 200 && !isRiskyBody(body)) {
+        PROXY.report(pUrl, true);
+        return { ...r, _proxy: pUrl, _viaProxy: true };
+      }
+      // 代理也返回空壳 → 换下一个
+      PROXY.report(pUrl, false);
+    } catch (e) {
+      PROXY.report(pUrl, false);
+    }
+  }
+
+  // —— 全部失败: 直连再试一次给最长 timeout ——
+  try {
+    const r = await axios.get(url, { ...opts, timeout: 5000, maxRedirects: 5 });
+    return { ...r, _proxy: null, _viaProxy: false, _lastTry: true };
+  } catch (e) {
+    throw e;
+  }
+}
+
+// ==============================================================
+// 1. 种子库（真实爬虫彻底失败时才用）
 // ==============================================================
 const SEED_BANK = {
   jd: {
@@ -73,9 +288,7 @@ function randInt(min, max) { return Math.floor(rand(min, max + 1)); }
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 function inferCategory(kw) {
-  for (const cat of ['电脑', '手机', '家电']) {
-    if (kw.includes(cat)) return cat;
-  }
+  for (const cat of ['电脑', '手机', '家电', '相机', '耳机']) if (kw.includes(cat)) return cat;
   return 'default';
 }
 
@@ -106,120 +319,279 @@ function fallbackItems(platform, keyword, maxItems) {
     const shop = pick(SHOP_NAMES[platform] || SHOP_NAMES.jd);
     const itemId = randInt(10000000, 99999999);
     items.push({
-      platform, keyword, name,
-      price, original_price: original,
+      platform, keyword, name, price, original_price: original,
       sales, rating, shop_name: shop,
       url: `https://${HOST_MAP[platform]}/${itemId}.html`,
-      image_url: '',
-      crawled_at: now,
+      image_url: '', crawled_at: now, _source: 'fallback',
     });
   }
   return items;
 }
 
 // ==============================================================
-// 2. 爬虫（每个平台独立适配器，真实请求失败自动回退）
+// 2. 爬虫（每个平台独立适配器，先代理后直连，失败才回退）
 // ==============================================================
-const DEFAULT_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-                '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Accept-Language': 'zh-CN,zh;q=0.9',
-};
+const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+                  '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+const MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) ' +
+                  'AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148';
 
 async function tryJD(keyword, maxItems) {
-  try {
-    const url = `https://search.jd.com/Search?keyword=${encodeURIComponent(keyword)}&enc=utf-8`;
-    const resp = await axios.get(url, { headers: DEFAULT_HEADERS, timeout: 10000 });
-    if (resp.status !== 200) return null;
-    const $ = cheerio.load(resp.data);
-    const nodes = $('li.gl-item');
-    if (!nodes.length) return null;
-    const now = nowISO();
-    const items = [];
-    nodes.slice(0, maxItems).each((_, el) => {
-      const nameEl = $(el).find('.p-name a');
-      const priceEl = $(el).find('.p-price strong i');
-      const shopEl = $(el).find('.p-shop a');
-      const commentText = $(el).find('.p-commit strong a').text().trim();
-      const commentMatch = commentText.match(/(\d+(?:\.\d+)?)\s*(\+|万)/);
-      let sales = 0;
-      if (commentMatch) {
-        sales = parseFloat(commentMatch[1]);
-        if (commentMatch[2] === '万') sales *= 10000;
-        sales = Math.round(sales);
+  const urls = [
+    { url: `https://search.jd.com/Search?keyword=${encodeURIComponent(keyword)}&enc=utf-8`,
+      headers: { 'User-Agent': DEFAULT_UA, 'Accept-Language': 'zh-CN,zh;q=0.9', 'Referer': 'https://www.jd.com/' },
+      kind: 'pc' },
+    { url: `https://so.m.jd.com/ware/search.action?keyword=${encodeURIComponent(keyword)}&page=1`,
+      headers: { 'User-Agent': MOBILE_UA, 'Referer': 'https://m.jd.com/' },
+      kind: 'mobile' },
+  ];
+
+  for (const { url, headers, kind } of urls) {
+    try {
+      const resp = await proxiedRequest(url, { headers });
+      if (resp.status !== 200) continue;
+      const body = String(resp.data || '');
+      // 反爬检测
+      if (body.includes('京东验证') || body.includes('risk/shields') || body.length < 500) continue;
+
+      let $ = cheerio.load(body);
+      let nodes = $('li.gl-item');
+      if (!nodes.length) nodes = $('.ware-item, .ware-list-item');
+      if (!nodes.length) {
+        // 再试商品 JSON
+        const initMatch = body.match(/window\.__INIT__\s*=\s*({[\s\S]{200,20000}})/);
+        if (initMatch) {
+          try {
+            const data = JSON.parse(initMatch[1]);
+            const list = (data.data?.wareList || data.data?.ware_list || []).slice(0, maxItems);
+            if (list.length) {
+              const now = nowISO();
+              return list.map(w => ({
+                platform: 'jd', keyword,
+                name: w.wname || w.name || w.wareName || '',
+                price: parseFloat(w.price || w.p_price || 0) || 0,
+                original_price: parseFloat(w.oprice || 0) || 0,
+                sales: Math.round(Number(w.comment_num || 0) || 0),
+                rating: 0,
+                shop_name: w.shopName || w.shop_name || '',
+                url: w.skuId ? `https://item.jd.com/${w.skuId}.html` : (w.url || ''),
+                image_url: w.image || w.img || '',
+                crawled_at: now, _source: 'real', _proxy: resp._proxy,
+              })).filter(x => x.name && x.price > 0);
+            }
+          } catch (e) { /* ignore */ }
+        }
+        continue;
       }
-      let href = nameEl.attr('href') || '';
-      if (href.startsWith('//')) href = 'https:' + href;
-      const price = parseFloat(priceEl.text().trim()) || 0;
-      const name = nameEl.text().trim();
-      if (!name || price <= 0) return;
-      items.push({
-        platform: 'jd', keyword, name, price, original_price: 0,
-        sales, rating: 0, shop_name: shopEl.text().trim(),
-        url: href, image_url: '', crawled_at: now,
+
+      const now = nowISO();
+      const items = [];
+      nodes.slice(0, maxItems).each((_, el) => {
+        const nameEl = $(el).find('.p-name a, .p-name em, .ware-name');
+        const priceEl = $(el).find('.p-price strong i, .price-box .p-price');
+        const shopEl = $(el).find('.p-shop a, .item-shop-name');
+        const commentText = $(el).find('.p-commit strong a').text().trim();
+        let sales = 0;
+        const commentMatch = commentText.match(/(\d+(?:\.\d+)?)\s*(万|\+)/);
+        if (commentMatch) {
+          sales = parseFloat(commentMatch[1]);
+          if (commentMatch[2] === '万') sales *= 10000;
+          sales = Math.round(sales);
+        }
+        let href = (nameEl.attr('href') || '').trim();
+        if (href.startsWith('//')) href = 'https:' + href;
+        const priceText = priceEl.text().trim().replace(/[^\d.]/g, '');
+        const price = parseFloat(priceText) || 0;
+        const name = nameEl.text().trim();
+        if (!name || price <= 0) return;
+        items.push({
+          platform: 'jd', keyword, name, price, original_price: 0,
+          sales, rating: 0, shop_name: shopEl.text().trim(),
+          url: href, image_url: '', crawled_at: now,
+          _source: 'real', _proxy: resp._proxy,
+        });
       });
-    });
-    return items.length ? items : null;
-  } catch (e) { return null; }
+      if (items.length) {
+        console.log(`  [JD ${kind}] 真实抓取 ${items.length} 条 via ${resp._proxy || 'DIRECT'}`);
+        return items;
+      }
+    } catch (e) { /* 换下一 URL */ }
+  }
+  return null;
 }
 
 async function tryTaobao(keyword, maxItems) {
-  try {
-    const url = `https://s.taobao.com/search?q=${encodeURIComponent(keyword)}`;
-    const resp = await axios.get(url, { headers: DEFAULT_HEADERS, timeout: 10000 });
-    if (resp.status !== 200) return null;
-    const $ = cheerio.load(resp.data);
-    const anchors = $('a[href*="item.taobao.com"], a[href*="detail.tmall.com"]');
-    if (!anchors.length) return null;
-    const now = nowISO();
-    const items = [];
-    anchors.slice(0, maxItems).each((_, el) => {
-      const name = $(el).text().trim().slice(0, 60);
-      const href = $(el).attr('href') || '';
-      let priceText = $(el).next('.price').text() || $(el).parent().find('.price').text();
-      const price = parseFloat(priceText.replace(/[^\d.]/g, '')) || 0;
-      if (!name || price <= 0) return;
-      items.push({
-        platform: 'taobao', keyword, name, price, original_price: 0,
-        sales: 0, rating: 0, shop_name: '',
-        url: href.startsWith('http') ? href : `https:${href}`,
-        image_url: '', crawled_at: now,
-      });
-    });
-    return items.length ? items : null;
-  } catch (e) { return null; }
+  const urls = [
+    { url: `https://s.taobao.com/search?q=${encodeURIComponent(keyword)}&s=0&imgfile=&commend=all&ssid=s5-e&search_type=item&sourceId=tb.index`,
+      headers: { 'User-Agent': DEFAULT_UA, 'Referer': 'https://www.taobao.com/' } },
+    { url: `https://s.m.taobao.com/h5?q=${encodeURIComponent(keyword)}&search=提交&style=list`,
+      headers: { 'User-Agent': MOBILE_UA } },
+    { url: `https://h5api.m.taobao.com/h5/mtop.wdetail.sampleitem.find/1.0/?data=${encodeURIComponent(JSON.stringify({ keyword, pageSize: maxItems, pageNum: 1 }))}`,
+      headers: { 'User-Agent': MOBILE_UA } },
+  ];
+
+  for (const { url, headers } of urls) {
+    try {
+      const resp = await proxiedRequest(url, { headers });
+      if (resp.status !== 200) continue;
+      const body = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      if (body.includes('captcha') && body.includes('timeout')) continue;
+
+      // 淘宝新版 JSON (__INIT_DATA__)
+      const initMatch = body.match(/window\.__INIT_DATA__\s*=\s*(\{[\s\S]{200,200000}\});/);
+      if (initMatch) {
+        try {
+          const data = JSON.parse(initMatch[1]);
+          const itemList = data.modItems?.['3397598792410']?.list ||
+                           data.data?.resultList || [];
+          const list = itemList.filter(x => x && x.itemId).slice(0, maxItems);
+          if (list.length) {
+            const now = nowISO();
+            return list.map(x => ({
+              platform: 'taobao', keyword,
+              name: (x.rawTitle || x.title || '').replace(/<[^>]+>/g, '').slice(0, 80),
+              price: parseFloat(x.priceWap || x.price || 0) || 0,
+              original_price: parseFloat(x.price || 0) || 0,
+              sales: Math.round(Number(x.payNum || 0) || 0),
+              rating: 0,
+              shop_name: x.shopName || '',
+              url: x.detailUrl ? (x.detailUrl.startsWith('http') ? x.detailUrl : `https:${x.detailUrl}`) : `https://detail.tmall.com/item.htm?id=${x.itemId}`,
+              image_url: x.picUrl ? (x.picUrl.startsWith('//') ? `https:${x.picUrl}` : x.picUrl) : '',
+              crawled_at: now, _source: 'real', _proxy: resp._proxy,
+            })).filter(x => x.name && x.price > 0);
+          }
+        } catch (e) {}
+      }
+
+      // 老版 g_page_config
+      const cfgMatch = body.match(/g_page_config\s*=\s*(\{[\s\S]{200,50000}\})/);
+      if (cfgMatch) {
+        try {
+          const cfg = JSON.parse(cfgMatch[1]);
+          const itemList = cfg.mods?.['itemlist']?.data?.auctions || [];
+          if (itemList.length) {
+            const now = nowISO();
+            return itemList.slice(0, maxItems).map(a => ({
+              platform: 'taobao', keyword,
+              name: (a.raw_title || a.title || '').slice(0, 80),
+              price: parseFloat(a.view_price || 0) || 0,
+              original_price: parseFloat(a.view_original_price || 0) || 0,
+              sales: Math.round(Number(a.pay_num || 0) || 0),
+              rating: 0,
+              shop_name: a.shop_nick || '',
+              url: a.detail_url || `https://detail.tmall.com/item.htm?id=${a.item_id}`,
+              image_url: a.pic_url || '',
+              crawled_at: now, _source: 'real', _proxy: resp._proxy,
+            })).filter(x => x.name && x.price > 0);
+          }
+        } catch (e) {}
+      }
+
+      // HTML DOM 兜底
+      const $ = cheerio.load(body);
+      const anchors = $('a[href*="item.taobao.com"], a[href*="detail.tmall.com"], [class*="Card--doubleCard"]');
+      if (anchors.length >= 3) {
+        const now = nowISO();
+        const items = [];
+        anchors.slice(0, maxItems).each((_, el) => {
+          const name = $(el).text().trim().slice(0, 60);
+          const href = $(el).attr('href') || '';
+          const priceText = $(el).find('[class*="price"]').first().text().trim();
+          const price = parseFloat(priceText.replace(/[^\d.]/g, '')) || 0;
+          if (!name || price <= 0) return;
+          items.push({
+            platform: 'taobao', keyword, name, price, original_price: 0,
+            sales: 0, rating: 0, shop_name: '',
+            url: href.startsWith('http') ? href : `https:${href}`,
+            image_url: '', crawled_at: now,
+            _source: 'real', _proxy: resp._proxy,
+          });
+        });
+        if (items.length >= 2) {
+          console.log(`  [Taobao HTML] 真实抓取 ${items.length} 条 via ${resp._proxy || 'DIRECT'}`);
+          return items;
+        }
+      }
+    } catch (e) { /* next */ }
+  }
+  return null;
 }
 
 async function tryPDD(keyword, maxItems) {
-  // 拼多多必须 JS 渲染，静态爬取基本拿不到有效数据，直接返回 null 走回退
+  const urls = [
+    { url: `https://mobile.yangkeduo.com/search_result.html?search_key=${encodeURIComponent(keyword)}`,
+      headers: { 'User-Agent': MOBILE_UA } },
+  ];
+  for (const { url, headers } of urls) {
+    try {
+      const resp = await proxiedRequest(url, { headers });
+      if (resp.status !== 200) continue;
+      const body = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      if (body.includes('probe.js') || body.includes('captcha')) continue;
+
+      // PDD 通常把数据塞 window 里
+      const rawMatch = body.match(/window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]{200,200000}\})/);
+      if (rawMatch) {
+        try {
+          const data = JSON.parse(rawMatch[1]);
+          const items = (data.goodsList || data.list || data.items || []).slice(0, maxItems);
+          if (items.length) {
+            const now = nowISO();
+            return items.map(g => ({
+              platform: 'pdd', keyword,
+              name: g.goods_name || g.title || g.name || '',
+              price: parseFloat(g.min_normal_price || g.price || 0) / 100 || 0,
+              original_price: parseFloat(g.market_price || g.price || 0) / 100 || 0,
+              sales: Math.round(Number(g.cnt || g.sales || 0) || 0),
+              rating: 0,
+              shop_name: g.mall_name || '',
+              url: `https://mobile.yangkeduo.com/goods1.html?goods_id=${g.goods_id || g.goodsId || ''}`,
+              image_url: g.thumb_url || g.image_url || '',
+              crawled_at: now, _source: 'real', _proxy: resp._proxy,
+            })).filter(x => x.name && x.price > 0);
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
   return null;
 }
 
 async function crawlOne(platform, keyword, maxItems) {
-  let items = null;
-  if (platform === 'jd') items = await tryJD(keyword, maxItems);
-  else if (platform === 'taobao') items = await tryTaobao(keyword, maxItems);
-  else if (platform === 'pdd') items = await tryPDD(keyword, maxItems);
-  if (!items) {
-    console.log(`[${PLATFORM_NAMES[platform] || platform}] 真实抓取失败，使用回退数据`);
-    items = fallbackItems(platform, keyword, maxItems);
+  // 平台级封顶：4s 超时直接放弃真实抓取 —— 防止远程网络卡住 TCP
+  const TIMEOUT_MS = 4000;
+  const realPromise = (async () => {
+    if (platform === 'jd') return tryJD(keyword, maxItems);
+    if (platform === 'taobao') return tryTaobao(keyword, maxItems);
+    if (platform === 'pdd') return tryPDD(keyword, maxItems);
+    return null;
+  })();
+  const timeoutPromise = new Promise(r => setTimeout(() => r(null), TIMEOUT_MS));
+  let items = await Promise.race([realPromise, timeoutPromise]);
+
+  if (!items || !items.length) {
+    console.log(`  [${PLATFORM_NAMES[platform] || platform}] 真实抓取失败(${items === null ? '超时/网络' : '无匹配'})，使用回退数据`);
+    return fallbackItems(platform, keyword, maxItems);
   }
+  items.forEach(it => { if (!it._source) it._source = 'real'; });
   return items;
 }
 
 async function crawlAll(keyword, platforms, maxPerPlatform) {
-  const all = [];
-  for (const p of platforms) {
-    console.log(`开始采集 [${PLATFORM_NAMES[p]}] ${keyword}`);
+  // 并行抓取 —— 每个平台 < 8s，总耗时 < 10s
+  const results = await Promise.all(platforms.map(async p => {
+    console.log(`[crawl] ${PLATFORM_NAMES[p]} keyword=${keyword} max=${maxPerPlatform}`);
     const items = await crawlOne(p, keyword, maxPerPlatform);
-    console.log(`  [${PLATFORM_NAMES[p]}] 获得 ${items.length} 条`);
-    all.push(...items);
-  }
-  return all;
+    const realCount = items.filter(x => x._source === 'real').length;
+    const fbCount = items.filter(x => x._source === 'fallback').length;
+    console.log(`  [${PLATFORM_NAMES[p]}] 总计 ${items.length} 条 (real=${realCount}, fallback=${fbCount})`);
+    return items;
+  }));
+  return results.flat();
 }
 
 // ==============================================================
-// 3. 清洗去重
+// 3. 清洗去重 + 分析（和 v1 一致，不重复）
 // ==============================================================
 function normalizeName(name) {
   if (!name) return '';
@@ -234,7 +606,6 @@ function clean(items) {
     const name = String(it.name || '').trim();
     return name && name.length >= 3 && (Number(it.price) || 0) > 0;
   });
-  // 归一化字段类型
   const normed = filtered.map(it => ({
     ...it,
     original_price: Number(it.original_price) || 0,
@@ -242,7 +613,6 @@ function clean(items) {
     rating: Math.round((Number(it.rating) || 0) * 10) / 10,
     price: Math.round(Number(it.price) * 100) / 100,
   }));
-  // 同平台同名去重，保留价格更低的
   const bucket = new Map();
   for (const it of normed) {
     const key = `${it.platform}||${normalizeName(it.name)}`;
@@ -253,13 +623,10 @@ function clean(items) {
   for (const [, group] of bucket) {
     out.push(group.reduce((a, b) => (a.price < b.price ? a : b)));
   }
-  console.log(`清洗完成: ${items.length} -> ${out.length}`);
+  console.log(`[clean] ${items.length} -> ${out.length}`);
   return out;
 }
 
-// ==============================================================
-// 4. 分析（统计、性价比评分、横向对比）
-// ==============================================================
 function median(arr) {
   if (!arr.length) return 0;
   const s = [...arr].sort((a, b) => a - b);
@@ -269,37 +636,30 @@ function median(arr) {
 
 function platformStats(items) {
   const groups = {};
-  for (const it of items) {
-    (groups[it.platform] = groups[it.platform] || []).push(it);
-  }
+  for (const it of items) (groups[it.platform] = groups[it.platform] || []).push(it);
   const stats = [];
   for (const [platform, arr] of Object.entries(groups)) {
     const prices = arr.map(x => x.price);
-    const ratings = arr.map(x => x.rating);
     stats.push({
-      platform,
-      platform_name: PLATFORM_NAMES[platform] || platform,
+      platform, platform_name: PLATFORM_NAMES[platform] || platform,
       count: arr.length,
-      price_min: Math.min(...prices),
-      price_max: Math.max(...prices),
+      price_min: Math.min(...prices), price_max: Math.max(...prices),
       price_avg: Math.round(prices.reduce((a, b) => a + b, 0) / prices.length * 100) / 100,
       price_median: Math.round(median(prices) * 100) / 100,
       sales_total: arr.reduce((a, b) => a + b.sales, 0),
-      rating_avg: Math.round(ratings.reduce((a, b) => a + b, 0) / ratings.length * 100) / 100,
+      rating_avg: Math.round(arr.reduce((a, b) => a + b.rating, 0) / arr.length * 100) / 100,
     });
   }
   if (items.length) {
-    const allPrices = items.map(x => x.price);
-    const allRatings = items.map(x => x.rating);
+    const ap = items.map(x => x.price), ar = items.map(x => x.rating);
     stats.push({
       platform: 'ALL', platform_name: '全部平台',
       count: items.length,
-      price_min: Math.min(...allPrices),
-      price_max: Math.max(...allPrices),
-      price_avg: Math.round(allPrices.reduce((a, b) => a + b, 0) / allPrices.length * 100) / 100,
-      price_median: Math.round(median(allPrices) * 100) / 100,
+      price_min: Math.min(...ap), price_max: Math.max(...ap),
+      price_avg: Math.round(ap.reduce((a, b) => a + b, 0) / ap.length * 100) / 100,
+      price_median: Math.round(median(ap) * 100) / 100,
       sales_total: items.reduce((a, b) => a + b.sales, 0),
-      rating_avg: Math.round(allRatings.reduce((a, b) => a + b, 0) / allRatings.length * 100) / 100,
+      rating_avg: Math.round(ar.reduce((a, b) => a + b, 0) / ar.length * 100) / 100,
     });
   }
   return stats;
@@ -324,21 +684,18 @@ function priceDistribution(items, bins = 10) {
 
 function crossCompare(items) {
   const groups = {};
-  for (const it of items) {
-    (groups[it.platform] = groups[it.platform] || []).push(it);
-  }
+  for (const it of items) (groups[it.platform] = groups[it.platform] || []).push(it);
   const rows = [];
   for (const [platform, arr] of Object.entries(groups)) {
     const lowest = arr.reduce((a, b) => (a.price < b.price ? a : b));
     rows.push({
-      platform,
-      platform_name: PLATFORM_NAMES[platform] || platform,
+      platform, platform_name: PLATFORM_NAMES[platform] || platform,
       lowest_price: lowest.price,
       item_name: lowest.name,
       item_url: lowest.url,
       shop_name: lowest.shop_name,
-      rating: lowest.rating,
-      sales: lowest.sales,
+      rating: lowest.rating, sales: lowest.sales,
+      source: lowest._source || 'real',
     });
   }
   return rows.sort((a, b) => a.lowest_price - b.lowest_price);
@@ -346,15 +703,11 @@ function crossCompare(items) {
 
 function computeValueScores(items) {
   if (!items.length) return items;
-  const prices = items.map(x => x.price);
-  const ratings = items.map(x => x.rating);
-  const sales = items.map(x => x.sales);
+  const prices = items.map(x => x.price), ratings = items.map(x => x.rating), sales = items.map(x => x.sales);
   const pLo = Math.min(...prices), pHi = Math.max(...prices);
   const rLo = Math.min(...ratings), rHi = Math.max(...ratings);
   const sLo = Math.min(...sales), sHi = Math.max(...sales);
-
   const w = { price: 0.4, rating: 0.3, sales: 0.3 };
-
   const scored = items.map(it => {
     const pNorm = pHi === pLo ? 0.5 : 1 - (it.price - pLo) / (pHi - pLo);
     const rNorm = rHi === rLo ? 0.5 : (it.rating - rLo) / (rHi - rLo);
@@ -362,13 +715,14 @@ function computeValueScores(items) {
     const score = Math.round((pNorm * w.price + rNorm * w.rating + sNorm * w.sales) * 1000) / 1000;
     return { ...it, value_score: score };
   });
-
   scored.sort((a, b) => (a.price - b.price) || (b.value_score - a.value_score));
 
-  // 打推荐标
-  const threshold25 = prices.sort((a, b) => a - b)[Math.floor(prices.length * 0.25)];
-  const topScored = [...scored].sort((a, b) => b.value_score - a.value_score).slice(0, 3);
+  const realItems = scored.filter(x => x._source === 'real');
+  const baselineSet = realItems.length ? realItems : scored;
+  const threshold25 = [...baselineSet].sort((a, b) => a.price - b.price)[Math.floor(baselineSet.length * 0.25)]?.price || 0;
+  const topScored = [...baselineSet].sort((a, b) => b.value_score - a.value_score).slice(0, 3);
   const topUrls = new Set(topScored.map(x => x.url));
+
   for (const it of scored) {
     if (topUrls.has(it.url)) it.recommend = '性价比推荐';
     else if (it.price <= threshold25) it.recommend = '低价好货';
@@ -379,134 +733,113 @@ function computeValueScores(items) {
 
 function toReport(items, keyword) {
   const scored = computeValueScores(items);
+  const realCount = scored.filter(x => x._source === 'real').length;
+  const fbCount = scored.filter(x => x._source === 'fallback').length;
   return {
-    keyword,
-    generated_at: nowISO(),
+    keyword, generated_at: nowISO(),
     stats: platformStats(scored),
     distribution: priceDistribution(scored),
     cross_compare: crossCompare(scored),
-    items: scored,
-    total: scored.length,
+    items: scored, total: scored.length,
+    data_source: {
+      real_count: realCount,
+      fallback_count: fbCount,
+      is_reliable: realCount > 0,
+      real_ratio: scored.length ? Math.round(realCount / scored.length * 100) : 0,
+      note: realCount > 0
+        ? `共 ${scored.length} 条数据，其中 ${realCount} 条真实抓取，${fbCount} 条因平台风控回退`
+        : `⚠️ 本次 ${keyword} 的 3 个电商平台全部触发反爬风控，所有 ${scored.length} 条为种子库回退数据。若需真实数据，请配置商用代理（环境变量 PROXY_URL）。`,
+    },
   };
 }
 
-// ==============================================================
-// 5. Demo 示例数据（用于页面初始加载和 api/demo）
-// ==============================================================
 function buildDemoData(keyword) {
-  const now = nowISO();
-  return {
-    keyword,
-    generated_at: now,
-    stats: [
-      { platform: 'jd', platform_name: '京东', count: 12, price_min: 6499, price_max: 9999,
-        price_avg: 7620.5, price_median: 7499, sales_total: 158200, rating_avg: 4.9 },
-      { platform: 'taobao', platform_name: '淘宝', count: 15, price_min: 6299, price_max: 9899,
-        price_avg: 7410.2, price_median: 7299, sales_total: 201300, rating_avg: 4.8 },
-      { platform: 'pdd', platform_name: '拼多多', count: 10, price_min: 5999, price_max: 8999,
-        price_avg: 6890.7, price_median: 6799, sales_total: 312500, rating_avg: 4.7 },
-      { platform: 'ALL', platform_name: '全部平台', count: 37, price_min: 5999, price_max: 9999,
-        price_avg: 7307.1, price_median: 7299, sales_total: 672000, rating_avg: 4.8 },
-    ],
-    cross_compare: [
-      { platform: 'jd', platform_name: '京东', lowest_price: 6499, item_name: `${keyword} 京东自营 128G`,
-        item_url: 'https://item.jd.com/100058809394.html', shop_name: '京东自营', rating: 4.9, sales: 98000 },
-      { platform: 'taobao', platform_name: '淘宝', lowest_price: 6299, item_name: `${keyword} 天猫旗舰店 128G`,
-        item_url: 'https://detail.tmall.com/item.htm?id=768420912345', shop_name: 'Apple官方旗舰店', rating: 4.9, sales: 123400 },
-      { platform: 'pdd', platform_name: '拼多多', lowest_price: 5999, item_name: `${keyword} 百亿补贴 128G`,
-        item_url: 'https://mobile.yangkeduo.com/goods1.html?goods_id=789456123', shop_name: 'Apple产品店', rating: 4.8, sales: 156700 },
-    ],
-    distribution: [
-      { range_start: 5999, range_end: 6299, count: 3 },
-      { range_start: 6299, range_end: 6799, count: 8 },
-      { range_start: 6799, range_end: 7499, count: 12 },
-      { range_start: 7499, range_end: 7999, count: 6 },
-      { range_start: 7999, range_end: 8599, count: 4 },
-      { range_start: 8599, range_end: 9999, count: 4 },
-    ],
-    items: [
-      { platform: 'pdd', keyword, name: `${keyword} 百亿补贴 128G 全新国行`,
-        price: 5999, original_price: 7999, sales: 156700, rating: 4.8, shop_name: 'Apple产品店',
-        url: 'https://mobile.yangkeduo.com/goods1.html?goods_id=789456123',
-        crawled_at: now, value_score: 0.92, recommend: '性价比推荐' },
-      { platform: 'taobao', keyword, name: `${keyword} 天猫旗舰店 128G`,
-        price: 6299, original_price: 7999, sales: 123400, rating: 4.9, shop_name: 'Apple官方旗舰店',
-        url: 'https://detail.tmall.com/item.htm?id=768420912345',
-        crawled_at: now, value_score: 0.89, recommend: '性价比推荐' },
-      { platform: 'jd', keyword, name: `${keyword} 京东自营 128G 24期免息`,
-        price: 6499, original_price: 7999, sales: 98000, rating: 4.9, shop_name: '京东自营',
-        url: 'https://item.jd.com/100058809394.html',
-        crawled_at: now, value_score: 0.81, recommend: '性价比推荐' },
-      { platform: 'pdd', keyword, name: `${keyword} 百亿补贴 256G`,
-        price: 6499, original_price: 8999, sales: 98400, rating: 4.7, shop_name: 'Apple产品店',
-        url: 'https://mobile.yangkeduo.com/goods1.html?goods_id=789456124',
-        crawled_at: now, value_score: 0.85, recommend: '' },
-      { platform: 'jd', keyword, name: `${keyword} 京东自营 256G`,
-        price: 6999, original_price: 8999, sales: 65200, rating: 4.9, shop_name: '京东自营',
-        url: 'https://item.jd.com/100058809395.html',
-        crawled_at: now, value_score: 0.72, recommend: '' },
-      { platform: 'taobao', keyword, name: `${keyword} 天猫旗舰店 256G`,
-        price: 6799, original_price: 8999, sales: 78100, rating: 4.9, shop_name: 'Apple官方旗舰店',
-        url: 'https://detail.tmall.com/item.htm?id=768420912346',
-        crawled_at: now, value_score: 0.76, recommend: '' },
-      { platform: 'pdd', keyword, name: `${keyword} 百亿补贴 512G`,
-        price: 7499, original_price: 10999, sales: 28900, rating: 4.7, shop_name: 'Apple产品店',
-        url: 'https://mobile.yangkeduo.com/goods1.html?goods_id=789456125',
-        crawled_at: now, value_score: 0.60, recommend: '' },
-      { platform: 'jd', keyword, name: `${keyword} Pro Max 128G 京东自营`,
-        price: 8499, original_price: 9999, sales: 42100, rating: 4.9, shop_name: '京东自营',
-        url: 'https://item.jd.com/100058809396.html',
-        crawled_at: now, value_score: 0.55, recommend: '' },
-    ],
-    total: 8,
+  const base = {
+    jd:     { shop: '京东自营',    host: 'item.jd.com',  sku: '100058809394' },
+    taobao: { shop: 'Apple官方旗舰店', host: 'detail.tmall.com', id: '768420912345' },
+    pdd:    { shop: 'Apple产品店',  host: 'mobile.yangkeduo.com', goodsId: '789456123' },
   };
+  const now = nowISO();
+  const items = [
+    { platform: 'pdd',     price: 5999, shop: 'Apple产品店',       name: `${keyword} 百亿补贴 128G 全新国行` },
+    { platform: 'taobao', price: 6299, shop: 'Apple官方旗舰店',   name: `${keyword} 天猫旗舰店 128G` },
+    { platform: 'jd',     price: 6499, shop: '京东自营',          name: `${keyword} 京东自营 128G 24期免息` },
+    { platform: 'pdd',     price: 6499, shop: 'Apple产品店',       name: `${keyword} 百亿补贴 256G` },
+    { platform: 'taobao', price: 6799, shop: 'Apple官方旗舰店',   name: `${keyword} 天猫旗舰店 256G` },
+    { platform: 'jd',     price: 6999, shop: '京东自营',          name: `${keyword} 京东自营 256G` },
+    { platform: 'pdd',     price: 7499, shop: 'Apple产品店',       name: `${keyword} 百亿补贴 512G` },
+    { platform: 'jd',     price: 8499, shop: '京东自营',          name: `${keyword} Pro Max 128G 京东自营` },
+  ];
+  const out = items.map((it, i) => ({
+    platform: it.platform, keyword, name: it.name,
+    price: it.price, original_price: Math.round(it.price * 1.25 * 100) / 100,
+    sales: [156700, 123400, 98000, 98400, 78100, 65200, 28900, 42100][i],
+    rating: [4.8, 4.9, 4.9, 4.7, 4.9, 4.9, 4.7, 4.9][i],
+    shop_name: it.shop,
+    url: it.platform === 'jd'
+      ? `https://item.jd.com/${100000000000 + i}.html`
+      : it.platform === 'taobao'
+        ? `https://detail.tmall.com/item.htm?id=${768420912300 + i}`
+        : `https://mobile.yangkeduo.com/goods1.html?goods_id=${789456120 + i}`,
+    crawled_at: now, _source: 'demo', recommend: '',
+  }));
+  return toReport(out, keyword);
 }
 
 // ==============================================================
-// 6. Express 路由
+// 4. Express 路由
 // ==============================================================
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.use(express.static(path.join(__dirname, 'public')));
 
-app.use('/api/health', (req, res) => res.json({ ok: true, ts: nowISO() }));
+app.get('/api/health', (req, res) => res.json({ ok: true, ts: nowISO(), proxy: PROXY.status }));
+
+app.get('/api/proxy', async (req, res) => {
+  // 不强制刷新，返回当前状态即可
+  res.json({ ok: true, data: PROXY.status });
+});
 
 app.get('/api/demo', (req, res) => {
   const kw = req.query.keyword || 'iPhone 15 Pro';
-  res.json({ ok: true, data: buildDemoData(kw) });
+  res.json({ ok: true, data: buildDemoData(kw), demo: true });
 });
 
 app.post('/api/search', async (req, res) => {
+  const body = req.body || {};
+  const keyword = String(body.keyword || '').trim();
+  if (!keyword) return res.status(400).json({ ok: false, msg: '请输入关键词' });
+  const platforms = Array.isArray(body.platforms) && body.platforms.length
+    ? body.platforms : ['jd', 'taobao', 'pdd'];
+  const maxPer = Math.min(Math.max(parseInt(body.max_per_platform) || 20, 1), 50);
+
+  console.log(`\n===== /api/search keyword="${keyword}" platforms=${platforms} max=${maxPer} =====`);
+  console.log(`ProxyPool: ${PROXY.status.totalCount} 个代理，有效 ${PROXY.status.okCount}`);
+
   try {
-    const body = req.body || {};
-    const keyword = String(body.keyword || '').trim();
-    if (!keyword) return res.status(400).json({ ok: false, msg: '请输入关键词' });
-    const platforms = Array.isArray(body.platforms) && body.platforms.length
-      ? body.platforms : ['jd', 'taobao', 'pdd'];
-    const maxPer = Math.min(Math.max(parseInt(body.max_per_platform) || 20, 1), 50);
-
-    console.log(`[API] search keyword=${keyword} platforms=${platforms} max=${maxPer}`);
-
     const raw = await crawlAll(keyword, platforms, maxPer);
     const items = clean(raw);
     const report = toReport(items, keyword);
-
+    report.proxy_info = PROXY.status;
     res.json({ ok: true, data: report });
   } catch (e) {
-    console.error('[API] search failed:', e);
+    console.error('[search failed]', e);
     res.status(500).json({ ok: false, msg: String(e && e.message || e) });
   }
 });
 
-// 静态前端
-app.use(express.static(path.join(__dirname, 'public')));
-
-// 兜底 404
 app.use((req, res) => res.status(404).json({ ok: false, msg: 'not found' }));
 
 const PORT = parseInt(process.env.PORT) || 8000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🛒 电商价格对比工具已启动`);
+app.listen(PORT, '0.0.0.0', async () => {
+  console.log(`\n🛒 电商价格对比工具 v2.1（代理池+并行版）已启动`);
   console.log(`   监听: 0.0.0.0:${PORT}`);
-  console.log(`   API  : POST /api/search   GET /api/demo   GET /api/health\n`);
+  console.log(`   API  : POST /api/search   GET /api/demo   GET /api/health   GET /api/proxy`);
+  console.log(`   代理 : ${PROXY.enabled ? '开启（内置 30 + 异步增量刷新）' : '关闭'}`);
+  console.log(`   手动代理: ${process.env.PROXY_URL || '未配置（可选 PROXY_URL / PROXY_LIST 环境变量）'}`);
+  // 启动时先初始化代理池 —— 内置 30 个秒回
+  try {
+    await PROXY.refresh();
+    console.log(`   代理池就绪: 共 ${PROXY.status.totalCount} 个，可用 ${PROXY.status.okCount}`);
+  } catch (e) { /* ignore */ }
+  console.log('');
 });
