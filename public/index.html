@@ -63,6 +63,27 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   footer { text-align:center; color:#adb5bd; font-size:12px; padding:20px; }
+
+  /* 数据来源状态条 —— 让用户一眼知道数据真不真实 */
+  .data-banner { border-radius:12px; padding:16px 22px; margin-bottom:16px;
+                 font-size:15px; font-weight:500; display:none;
+                 border-left: 6px solid; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+  .data-banner.show { display:block; }
+  .data-banner .db-title { font-size:16px; font-weight:700; margin-bottom:4px; }
+  .data-banner .db-sub { font-size:13px; opacity:.92; line-height:1.6; margin-top:6px; }
+  .data-banner .db-row { display:flex; gap:16px; margin-top:10px; flex-wrap:wrap; }
+  .data-banner .db-stat { background:rgba(255,255,255,.22); padding:6px 14px; border-radius:20px; font-size:13px; }
+  .data-banner.ok    { background:#d4edda; color:#155724; border-color:#28a745; }
+  .data-banner.warn  { background:#fff3cd; color:#856404; border-color:#ffc107; }
+  .data-banner.bad   { background:#f8d7da; color:#721c24; border-color:#dc3545; }
+  .data-banner.demo  { background:#e2e3e5; color:#383d41; border-color:#6c757d; }
+
+  /* 数据来源标签（表格里每行） */
+  .src-tag { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; }
+  .src-tag.real    { background:#28a74522; color:#28a745; }
+  .src-tag.fallback{ background:#dc354522; color:#dc3545; }
+  .src-tag.demo    { background:#6c757d22; color:#6c757d; }
+  .src-tag.proxy   { background:#2a529822; color:#2a5298; }
 </style>
 </head>
 <body>
@@ -90,6 +111,9 @@
     </div>
     <div class="msg" id="msg"></div>
   </div>
+
+  <!-- 🔴🟡🟢 数据来源状态条 —— 绝不让用户被蒙在鼓里 -->
+  <div class="data-banner" id="dataBanner"></div>
 
   <!-- 汇总统计 -->
   <div class="card">
@@ -132,7 +156,7 @@
     <h2>🏷️ 全部商品（按价格升序）</h2>
     <table>
       <thead><tr>
-        <th>#</th><th>平台</th><th>商品名称</th><th>价格</th><th>原价</th>
+        <th>#</th><th>来源</th><th>平台</th><th>商品名称</th><th>价格</th><th>原价</th>
         <th>店铺</th><th>评分</th><th>销量</th><th>性价比分</th><th>推荐</th>
       </tr></thead>
       <tbody id="itemsTbody"></tbody>
@@ -144,8 +168,22 @@
 <footer>电商价格对比工具 · CLI + Web · 数据仅供参考</footer>
 
 <script>
-  // Jinja 注入的初始 demo 数据
-  const DEMO = {"keyword":"iPhone 15 Pro","generated_at":"2026-11-23 07:09:19","stats":[{"platform":"jd","platform_name":"京东","count":12,"price_min":6499,"price_max":9999,"price_avg":7620.5,"price_median":7499,"sales_total":158200,"rating_avg":4.9},{"platform":"taobao","platform_name":"淘宝","count":15,"price_min":6299,"price_max":9899,"price_avg":7410.2,"price_median":7299,"sales_total":201300,"rating_avg":4.8},{"platform":"pdd","platform_name":"拼多多","count":10,"price_min":5999,"price_max":8999,"price_avg":6890.7,"price_median":6799,"sales_total":312500,"rating_avg":4.7},{"platform":"ALL","platform_name":"全部平台","count":37,"price_min":5999,"price_max":9999,"price_avg":7307.1,"price_median":7299,"sales_total":672000,"rating_avg":4.8}],"cross_compare":[{"platform":"jd","platform_name":"京东","lowest_price":6499,"item_name":"iPhone 15 Pro 京东自营 128G","item_url":"https://item.jd.com/100058809394.html","shop_name":"京东自营","rating":4.9,"sales":98000},{"platform":"taobao","platform_name":"淘宝","lowest_price":6299,"item_name":"iPhone 15 Pro 天猫旗舰店 128G","item_url":"https://detail.tmall.com/item.htm?id=768420912345","shop_name":"Apple官方旗舰店","rating":4.9,"sales":123400},{"platform":"pdd","platform_name":"拼多多","lowest_price":5999,"item_name":"iPhone 15 Pro 百亿补贴 128G","item_url":"https://mobile.yangkeduo.com/goods1.html?goods_id=789456123","shop_name":"Apple产品店","rating":4.8,"sales":156700}],"distribution":[{"range_start":5999,"range_end":6299,"count":3},{"range_start":6299,"range_end":6799,"count":8},{"range_start":6799,"range_end":7499,"count":12},{"range_start":7499,"range_end":7999,"count":6},{"range_start":7999,"range_end":8599,"count":4},{"range_start":8599,"range_end":9999,"count":4}],"items":[{"platform":"pdd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 百亿补贴 128G 全新国行","price":5999,"original_price":7999,"sales":156700,"rating":4.8,"shop_name":"Apple产品店","url":"https://mobile.yangkeduo.com/goods1.html?goods_id=789456123","crawled_at":"2026-11-23 10:00:00","value_score":0.92,"recommend":"性价比推荐"},{"platform":"taobao","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 天猫旗舰店 128G","price":6299,"original_price":7999,"sales":123400,"rating":4.9,"shop_name":"Apple官方旗舰店","url":"https://detail.tmall.com/item.htm?id=768420912345","crawled_at":"2026-11-23 10:00:00","value_score":0.89,"recommend":"性价比推荐"},{"platform":"jd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 京东自营 128G 24期免息","price":6499,"original_price":7999,"sales":98000,"rating":4.9,"shop_name":"京东自营","url":"https://item.jd.com/100058809394.html","crawled_at":"2026-11-23 10:00:00","value_score":0.81,"recommend":"性价比推荐"},{"platform":"pdd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 百亿补贴 256G","price":6499,"original_price":8999,"sales":98400,"rating":4.7,"shop_name":"Apple产品店","url":"https://mobile.yangkeduo.com/goods1.html?goods_id=789456124","crawled_at":"2026-11-23 10:00:00","value_score":0.85,"recommend":""},{"platform":"jd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 京东自营 256G","price":6999,"original_price":8999,"sales":65200,"rating":4.9,"shop_name":"京东自营","url":"https://item.jd.com/100058809395.html","crawled_at":"2026-11-23 10:00:00","value_score":0.72,"recommend":""},{"platform":"taobao","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 天猫旗舰店 256G","price":6799,"original_price":8999,"sales":78100,"rating":4.9,"shop_name":"Apple官方旗舰店","url":"https://detail.tmall.com/item.htm?id=768420912346","crawled_at":"2026-11-23 10:00:00","value_score":0.76,"recommend":""},{"platform":"pdd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 百亿补贴 512G","price":7499,"original_price":10999,"sales":28900,"rating":4.7,"shop_name":"Apple产品店","url":"https://mobile.yangkeduo.com/goods1.html?goods_id=789456125","crawled_at":"2026-11-23 10:00:00","value_score":0.6,"recommend":""},{"platform":"jd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro Max 128G 京东自营","price":8499,"original_price":9999,"sales":42100,"rating":4.9,"shop_name":"京东自营","url":"https://item.jd.com/100058809396.html","crawled_at":"2026-11-23 10:00:00","value_score":0.55,"recommend":""}],"total":8};
+  // 初始演示数据 —— 明确标注为 demo，绝不冒充真实
+  const DEMO = {"keyword":"iPhone 15 Pro","generated_at":"2026-11-23 10:00:00","total":8,
+    "data_source":{"real_count":0,"fallback_count":0,"is_reliable":false,"real_ratio":0,"note":"🎲 内置演示数据，仅供浏览体验。点击「🚀 开始采集」获取真实搜索结果。"},
+    "stats":[{"platform":"jd","platform_name":"京东","count":12,"price_min":6499,"price_max":9999,"price_avg":7620.5,"price_median":7499,"sales_total":158200,"rating_avg":4.9},{"platform":"taobao","platform_name":"淘宝","count":15,"price_min":6299,"price_max":9899,"price_avg":7410.2,"price_median":7299,"sales_total":201300,"rating_avg":4.8},{"platform":"pdd","platform_name":"拼多多","count":10,"price_min":5999,"price_max":8999,"price_avg":6890.7,"price_median":6799,"sales_total":312500,"rating_avg":4.7},{"platform":"ALL","platform_name":"全部平台","count":37,"price_min":5999,"price_max":9999,"price_avg":7307.1,"price_median":7299,"sales_total":672000,"rating_avg":4.8}],
+    "cross_compare":[{"platform":"jd","platform_name":"京东","lowest_price":6499,"item_name":"iPhone 15 Pro 京东自营 128G","item_url":"https://item.jd.com/100058809394.html","shop_name":"京东自营","rating":4.9,"sales":98000},{"platform":"taobao","platform_name":"淘宝","lowest_price":6299,"item_name":"iPhone 15 Pro 天猫旗舰店 128G","item_url":"https://detail.tmall.com/item.htm?id=768420912345","shop_name":"Apple官方旗舰店","rating":4.9,"sales":123400},{"platform":"pdd","platform_name":"拼多多","lowest_price":5999,"item_name":"iPhone 15 Pro 百亿补贴 128G","item_url":"https://mobile.yangkeduo.com/goods1.html?goods_id=789456123","shop_name":"Apple产品店","rating":4.8,"sales":156700}],
+    "distribution":[{"range_start":5999,"range_end":6299,"count":3},{"range_start":6299,"range_end":6799,"count":8},{"range_start":6799,"range_end":7499,"count":12},{"range_start":7499,"range_end":7999,"count":6},{"range_start":7999,"range_end":8599,"count":4},{"range_start":8599,"range_end":9999,"count":4}],
+    "items":[
+      {"platform":"pdd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 百亿补贴 128G 全新国行","price":5999,"original_price":7999,"sales":156700,"rating":4.8,"shop_name":"Apple产品店","url":"https://mobile.yangkeduo.com/goods1.html?goods_id=789456123","crawled_at":"2026-11-23 10:00:00","_source":"demo","value_score":0.92,"recommend":"性价比推荐"},
+      {"platform":"taobao","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 天猫旗舰店 128G","price":6299,"original_price":7999,"sales":123400,"rating":4.9,"shop_name":"Apple官方旗舰店","url":"https://detail.tmall.com/item.htm?id=768420912345","crawled_at":"2026-11-23 10:00:00","_source":"demo","value_score":0.89,"recommend":"性价比推荐"},
+      {"platform":"jd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 京东自营 128G 24期免息","price":6499,"original_price":7999,"sales":98000,"rating":4.9,"shop_name":"京东自营","url":"https://item.jd.com/100058809394.html","crawled_at":"2026-11-23 10:00:00","_source":"demo","value_score":0.81,"recommend":"性价比推荐"},
+      {"platform":"pdd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 百亿补贴 256G","price":6499,"original_price":8999,"sales":98400,"rating":4.7,"shop_name":"Apple产品店","url":"https://mobile.yangkeduo.com/goods1.html?goods_id=789456124","crawled_at":"2026-11-23 10:00:00","_source":"demo","value_score":0.85,"recommend":""},
+      {"platform":"jd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 京东自营 256G","price":6999,"original_price":8999,"sales":65200,"rating":4.9,"shop_name":"京东自营","url":"https://item.jd.com/100058809395.html","crawled_at":"2026-11-23 10:00:00","_source":"demo","value_score":0.72,"recommend":""},
+      {"platform":"taobao","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 天猫旗舰店 256G","price":6799,"original_price":8999,"sales":78100,"rating":4.9,"shop_name":"Apple官方旗舰店","url":"https://detail.tmall.com/item.htm?id=768420912346","crawled_at":"2026-11-23 10:00:00","_source":"demo","value_score":0.76,"recommend":""},
+      {"platform":"pdd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro 百亿补贴 512G","price":7499,"original_price":10999,"sales":28900,"rating":4.7,"shop_name":"Apple产品店","url":"https://mobile.yangkeduo.com/goods1.html?goods_id=789456125","crawled_at":"2026-11-23 10:00:00","_source":"demo","value_score":0.6,"recommend":""},
+      {"platform":"jd","keyword":"iPhone 15 Pro","name":"iPhone 15 Pro Max 128G 京东自营","price":8499,"original_price":9999,"sales":42100,"rating":4.9,"shop_name":"京东自营","url":"https://item.jd.com/100058809396.html","crawled_at":"2026-11-23 10:00:00","_source":"demo","value_score":0.55,"recommend":""}
+    ]};
   const PLATFORM_COLORS = { "jd":"#E1251B", "taobao":"#FF6A00", "pdd":"#E02E24" };
   const PLATFORM_NAMES = { "jd":"京东", "taobao":"淘宝", "pdd":"拼多多" };
 
@@ -160,10 +198,80 @@
     return v.toString();
   }
 
+  function renderDataBanner(d){
+    const banner = document.getElementById('dataBanner');
+    const ds = d.data_source || {};
+    const realCount = ds.real_count || 0;
+    const fbCount = ds.fallback_count || 0;
+    const total = d.total || 0;
+    const isDemo = (d.items || []).every(i => i._source === 'demo') || total === 0;
+
+    banner.className = 'data-banner show';
+    if (isDemo && realCount === 0 && fbCount === 0) {
+      banner.className = 'data-banner demo show';
+      banner.innerHTML = `<div class="db-title">🎲 当前是演示数据</div>
+        <div class="db-sub">这是页面内置的示例商品，不是实时采集结果。点击「🚀 开始采集」获取真实搜索结果。</div>`;
+      return 'demo';
+    }
+    if (realCount === 0 && fbCount > 0) {
+      banner.className = 'data-banner bad show';
+      banner.innerHTML = `<div class="db-title">⚠️ 全部 ${total} 条数据为回退种子（非真实采集）</div>
+        <div class="db-sub">${ds.note || '三大电商出口 IP 被风控，所有数据来自内置种子库，仅供体验分析功能用。价格/销量/店铺均为模拟值。'}</div>
+        <div class="db-row">
+          <span class="db-stat">🔴 真实采集: 0 条</span>
+          <span class="db-stat">⚠️ 种子回退: ${fbCount} 条</span>
+          <span class="db-stat">📡 建议: 配置商用代理 PROXY_URL 环境变量</span>
+        </div>`;
+      return 'bad';
+    }
+    if (realCount > 0 && fbCount > 0) {
+      banner.className = 'data-banner warn show';
+      banner.innerHTML = `<div class="db-title">🟡 部分数据为回退</div>
+        <div class="db-sub">${ds.note || `共 ${total} 条，${realCount} 条真实采集，${fbCount} 条种子回退。回退数据行标记有红色[回退]标签。`}</div>
+        <div class="db-row">
+          <span class="db-stat">🟢 真实采集: ${realCount} 条</span>
+          <span class="db-stat">🔴 种子回退: ${fbCount} 条</span>
+        </div>`;
+      return 'warn';
+    }
+    if (realCount > 0 && fbCount === 0) {
+      banner.className = 'data-banner ok show';
+      const proxyInfo = d.proxy_info;
+      const proxyText = proxyInfo && proxyInfo.totalCount
+        ? `（代理池 ${proxyInfo.okCount}/${proxyInfo.totalCount} 可用）` : '';
+      banner.innerHTML = `<div class="db-title">✅ 全部 ${realCount} 条均为真实采集 ${proxyText}</div>
+        <div class="db-sub">数据直接来自目标电商网站，字段完整，价格/销量/店铺均为实时抓取值。</div>
+        <div class="db-row">
+          <span class="db-stat">🟢 真实采集: ${realCount} 条</span>
+          ${ds.real_ratio ? `<span class="db-stat">覆盖率: ${ds.real_ratio}%</span>` : ''}
+        </div>`;
+      return 'ok';
+    }
+    banner.classList.remove('show');
+    return null;
+  }
+
+  function sourceTag(it){
+    const src = it._source || 'unknown';
+    if (src === 'real') return `<span class="src-tag real">真实</span>`;
+    if (src === 'fallback') return `<span class="src-tag fallback">回退</span>`;
+    if (src === 'demo') return `<span class="src-tag demo">演示</span>`;
+    return `<span class="src-tag demo">?</span>`;
+  }
+
   function renderAll(d){
+    // 顶部数据来源状态条（🔴🟡🟢）
+    const bannerLevel = renderDataBanner(d);
+
     // 标题
-    document.querySelector('header .sub').innerHTML =
-      `关键词：<b>${d.keyword}</b> &nbsp;|&nbsp; 生成时间：${d.generated_at} &nbsp;|&nbsp; 商品总数：${d.total}`;
+    const ds = d.data_source || {};
+    const realCount = ds.real_count || 0;
+    const fbCount = ds.fallback_count || 0;
+    let subHtml = `关键词：<b>${d.keyword}</b> &nbsp;|&nbsp; 生成时间：${d.generated_at} &nbsp;|&nbsp; 商品总数：${d.total}`;
+    if (bannerLevel === 'bad') subHtml += ` &nbsp;|&nbsp; <span style="color:#dc3545;font-weight:700">⚠️ 非真实数据</span>`;
+    else if (bannerLevel === 'warn') subHtml += ` &nbsp;|&nbsp; <span style="color:#856404;font-weight:700">🟡 部分回退</span>`;
+    else if (bannerLevel === 'ok') subHtml += ` &nbsp;|&nbsp; <span style="color:#28a745;font-weight:700">✅ 全真实</span>`;
+    document.querySelector('header .sub').innerHTML = subHtml;
 
     // 汇总卡
     const sr = document.getElementById('statsRow');
@@ -267,8 +375,10 @@
     itb.innerHTML = '';
     items.forEach((it, idx) => {
       const recCls = it.recommend === '性价比推荐' ? 'rec' : (it.recommend === '低价好货' ? 'cheap' : '');
-      itb.innerHTML += `<tr>
+      const row = `<tr${it._source === 'fallback' ? ' style="background:#fff6f6"' : ''}>`;
+      itb.innerHTML += `${row}
         <td>${idx+1}</td>
+        <td>${sourceTag(it)}</td>
         <td>${platformBadge(it.platform)}</td>
         <td><a class="link" href="${it.url}" target="_blank">${it.name}</a></td>
         <td><b style="color:#E1251B">${fmtPrice(it.price)}</b></td>
@@ -311,8 +421,21 @@
       });
       const json = await resp.json();
       if (!json.ok) throw new Error(json.msg);
-      renderAll(json.data);
-      showMsg(true, `✅ 采集完成，共 ${json.data.total} 条数据 → 已保存 ${json.saved}`);
+      const d = json.data;
+      renderAll(d);
+      // 🔴🟡🟢 根据真实度动态措辞
+      const ds = d.data_source || {};
+      const realCount = ds.real_count || 0;
+      const fbCount = ds.fallback_count || 0;
+      if (realCount === 0 && fbCount > 0) {
+        showMsg(false, `⚠️ 采集完成但 ${fbCount} 条全为回退种子数据（非真实）。出口 IP 被风控，需配置商用代理才能抓到真实数据。`);
+      } else if (realCount > 0 && fbCount > 0) {
+        showMsg(true, `🟡 部分采集成功：真实 ${realCount} 条，回退 ${fbCount} 条。`);
+      } else if (realCount > 0 && fbCount === 0) {
+        showMsg(true, `✅ 真实采集成功！共 ${realCount} 条，全部来自目标电商网站。`);
+      } else {
+        showMsg(false, `❌ 采集结果为空，请换关键词或平台再试。`);
+      }
     } catch(e) {
       showMsg(false, '❌ ' + e.message);
     } finally {
