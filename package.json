@@ -1,0 +1,20 @@
+{
+  "name": "price-watcher",
+  "version": "1.0.0",
+  "description": "电商价格自动化采集与对比工具 - 动态查询 Web 版",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "sh build.sh",
+    "run": "sh run.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5"
+  }
+}
