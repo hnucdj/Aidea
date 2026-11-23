@@ -186,6 +186,33 @@ async function proxiedRequest(url, opts = {}) {
   PROXY.stats.totalReq++;
   await PROXY.refresh();
 
+  // ⚠️ 商用代理 lock 模式：配了 PROXY_URL/PROXY_LIST → 强制走商用代理，绝不直连！
+  // （防止 FunctionWeb 出口 IP 暴露给电商被拉黑）
+  const isLocked = PROXY.lockUrl || PROXY.lockList.length > 0;
+  if (isLocked) {
+    const proxies = PROXY.pickN(2); // lock 模式只尝试 2 个
+    for (const pUrl of proxies) {
+      try {
+        PROXY.stats.proxyHits++;
+        const agent = new (HttpsProxyAgent || HttpProxyAgent)(pUrl, { timeout: 5000 });
+        const r = await axios.get(url, {
+          ...opts, httpsAgent: agent, httpAgent: agent,
+          timeout: 6000, maxRedirects: 5,
+        });
+        const body = String(r.data || '');
+        if (r.status === 200 && !isRiskyBody(body)) {
+          PROXY.report(pUrl, true);
+          return { ...r, _proxy: pUrl, _viaProxy: true, _lockMode: true };
+        }
+        PROXY.report(pUrl, false);
+      } catch (e) {
+        PROXY.report(pUrl, false);
+      }
+    }
+    // lock 模式全代理失败 → 不再直连（暴露出口 IP），直接抛出
+    throw new Error(`商用代理全部失败 (${proxies.length} 个)，请检查 PROXY_URL 配置`);
+  }
+
   const maxProxies = opts.maxProxies || 2;
   const DIRECT_TIMEOUT = 3000;
   const PROXY_TIMEOUT = 2500;
@@ -197,7 +224,6 @@ async function proxiedRequest(url, opts = {}) {
     if (!isRiskyBody(body)) {
       return { ...r, _proxy: null, _viaProxy: false };
     }
-    // 直连返回风控页 → 标记为一次失败，继续代理
   } catch (e) { /* 直连网络错误 → 走代理 */ }
 
   // —— 阶段 2: 代理池兜底（2 个代理，各 2.5s）——
@@ -215,7 +241,6 @@ async function proxiedRequest(url, opts = {}) {
         PROXY.report(pUrl, true);
         return { ...r, _proxy: pUrl, _viaProxy: true };
       }
-      // 代理也返回空壳 → 换下一个
       PROXY.report(pUrl, false);
     } catch (e) {
       PROXY.report(pUrl, false);
@@ -792,7 +817,81 @@ function buildDemoData(keyword) {
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/api/health', (req, res) => res.json({ ok: true, ts: nowISO(), proxy: PROXY.status }));
+app.get('/api/health', (req, res) => {
+  const s = PROXY.status;
+  s.lock_mode = !!(PROXY.lockUrl || PROXY.lockList.length);
+  s.proxy_url_configured = !!PROXY.lockUrl;
+  res.json({ ok: true, ts: nowISO(), proxy: s });
+});
+
+// ⚡ 代理连通性诊断 —— 配了商用代理后立即验证
+app.get('/api/proxy-test', async (req, res) => {
+  const s = PROXY.status;
+  s.lock_mode = !!(PROXY.lockUrl || PROXY.lockList.length);
+
+  if (!s.lock_mode) {
+    return res.json({
+      ok: false,
+      msg: '⚠️ 未配置商用代理（无 PROXY_URL / PROXY_LIST 环境变量）。当前仅用免费代理池 + 直连，电商已全部封出口 IP。',
+      current_mode: 'free_pool',
+      how_to_fix: '购买隧道代理（如快代理/芝麻代理/青果代理 tunnel），设置 PROXY_URL=http://user:pass@host:port 环境变量后重新部署',
+    });
+  }
+
+  const tests = [];
+  // 测试 1: 代理本身通不通（访问百度）
+  const t0 = Date.now();
+  try {
+    const agent = new (HttpsProxyAgent || HttpProxyAgent)(PROXY.pickN(1)[0], { timeout: 5000 });
+    const r = await axios.get('https://www.baidu.com/', {
+      httpsAgent: agent, httpAgent: agent, timeout: 6000, maxRedirects: 2,
+    });
+    tests.push({ name: '代理→百度', ok: true, status: r.status, latency_ms: Date.now() - t0, body_len: String(r.data).length });
+  } catch (e) {
+    tests.push({ name: '代理→百度', ok: false, error: String(e && e.message || e), latency_ms: Date.now() - t0 });
+  }
+
+  // 测试 2: 代理能不能通目标电商（选第一个可访问的）
+  const targets = [
+    { name: '京东搜索', url: 'https://search.jd.com/Search?keyword=手机&enc=utf-8' },
+    { name: '淘宝搜索', url: 'https://s.taobao.com/search?q=手机' },
+    { name: '拼多多搜索', url: 'https://mobile.yangkeduo.com/search_result.html?search_key=手机' },
+  ];
+  for (const tg of targets) {
+    const t1 = Date.now();
+    try {
+      const r = await proxiedRequest(tg.url, {
+        headers: { 'User-Agent': DEFAULT_UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
+      });
+      const body = String(r.data || '');
+      const hasProduct = body.length > 2000 && !isRiskyBody(body);
+      tests.push({
+        name: tg.name, ok: hasProduct,
+        status: r.status, latency_ms: Date.now() - t1,
+        body_len: body.length,
+        proxy_used: r._proxy ? 'yes' : 'no',
+        risk_keywords_found: ['京东验证','probe.js','captcha','verify/safety'].filter(k => body.includes(k)),
+      });
+    } catch (e) {
+      tests.push({ name: tg.name, ok: false, error: String(e && e.message || e), latency_ms: Date.now() - t1 });
+    }
+  }
+
+  const allOk = tests.every(t => t.ok);
+  const realTargets = tests.filter(t => t.name.includes('搜索') && t.ok);
+  res.json({
+    ok: tests[0]?.ok ?? false,
+    lock_mode: true,
+    proxy_url: PROXY.lockUrl || `(list of ${PROXY.lockList.length})`,
+    results: tests,
+    real_capable_targets: realTargets.map(t => t.name),
+    note: allOk
+      ? '✅ 商用代理工作正常！电商请求已绕过出口 IP 封锁，搜索应该能拿到真实数据。'
+      : realTargets.length
+        ? `🟡 代理通了但部分电商仍有风控：${tests.filter(t=>!t.ok).map(t=>t.name).join(', ')}`
+        : '❌ 代理能连通但电商仍返回风控页/空壳。需要换成专门针对电商隧道优化的代理节点。',
+  });
+});
 
 app.get('/api/proxy', async (req, res) => {
   // 不强制刷新，返回当前状态即可
